@@ -120,11 +120,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ctrl_col1, ctrl_col2 = alt_col1, alt_col2 = st.columns([3, 1])
+ctrl_col1, ctrl_col2 = st.columns([3, 1])
 
 with ctrl_col1:
     raw_symbol = st.text_input(
-        "조회 종목 심볼", value="KORU/USDT", label_visibility="collapsed"
+        "조회 종목 심볼", value="BTC/USDT", label_visibility="collapsed"
     )
     symbol_input = raw_symbol.strip().upper()
 
@@ -135,24 +135,25 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (CCXT 라이브러리 기반 안정적 연동)
+# 3. 데이터 수집 함수 (CCXT 기반 안정적 연동)
 # ---------------------------------------------------------
 @st.cache_data(ttl=20)
 def load_market_data(symbol):
     try:
-        # 바이낸스 선물 거래소 객체 초기화 (공개 API 모드)
         exchange = ccxt.binance({
             'enableRateLimit': True,
             'options': {'defaultType': 'future'}
         })
         
-        # 심볼 포맷 정리 (예: KORU/USDT)
-        if '/' not in symbol:
-            if symbol.endswith('USDT'):
-                symbol = symbol[:-4] + '/USDT'
-        
-        # OHLCV 데이터 1시간봉 100개 로드
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        # 심볼 포맷 표준화 (예: KORUUSDT -> KORU/USDT)
+        clean_sym = symbol.replace('/', '').upper()
+        if clean_sym.endswith('USDT'):
+            base_coin = clean_sym[:-4]
+            formatted_symbol = f"{base_coin}/USDT"
+        else:
+            formatted_symbol = f"{symbol}/USDT" if '/' not in symbol else symbol
+
+        ohlcv = exchange.fetch_ohlcv(formatted_symbol, timeframe='1h', limit=100)
         if not ohlcv or len(ohlcv) == 0:
             return None, 0.0
 
@@ -177,10 +178,9 @@ def load_market_data(symbol):
             high=df['high'], low=df['low'], close=df['close'], window=14
         )
 
-        # 펀딩비 조회 시도
         funding_rate = 0.0100
         try:
-            funding_info = exchange.fetch_funding_rate(symbol)
+            funding_info = exchange.fetch_funding_rate(formatted_symbol)
             if funding_info and 'fundingRate' in funding_info:
                 funding_rate = float(funding_info['fundingRate']) * 100
         except Exception:
@@ -198,8 +198,8 @@ df, funding_rate = load_market_data(symbol_input)
 if df is None:
     st.error(
         f"🚨 '{symbol_input}' 선물의 데이터를 불러오지 못했습니다.\n\n"
-        f"**조치 사항**: Streamlit Cloud 환경에서 `ccxt` 라이브러리를 통해 접근 중입니다. "
-        f"앱의 **Requirements** 파일에 `ccxt` 패키지가 포함되어 있는지 확인해 주세요."
+        f"**확인 사항**: Streamlit Cloud 앱 설정의 `requirements.txt`에 `ccxt` 패키지가 포함되어 있는지, "
+        f"그리고 종목명이 올바른지 확인해 주세요."
     )
 else:
     curr = df.iloc[-1]
