@@ -124,7 +124,7 @@ ctrl_col1, ctrl_col2 = st.columns([3, 1])
 
 with ctrl_col1:
     raw_symbol = st.text_input(
-        "조회 종목 심볼", value="BTC/USDT", label_visibility="collapsed"
+        "조회 종목 심볼", value="KORU/USDT", label_visibility="collapsed"
     )
     symbol_input = raw_symbol.strip().upper()
 
@@ -135,35 +135,41 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 및 보조지표 계산 함수 (Direct API 우회 적용)
+# 3. 데이터 수집 및 보조지표 계산 함수 (Spot / Futures 자동 대응)
 # ---------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_market_data(symbol):
     formatted_symbol = symbol.replace('/', '').upper()
+    ohlcv = []
     
-    # 미국 IP 차단을 완전 우회하는 바이낸스 데이터 전용 Direct URL
-    url = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
-    
+    # 1차 시도: 현물(Spot) 우회 API
+    url_spot = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        if isinstance(data, dict) and "code" in data:
-            return None, 0.0
-
-        ohlcv = []
-        for row in data:
-            ohlcv.append([
-                int(row[0]),     # timestamp
-                float(row[1]),   # open
-                float(row[2]),   # high
-                float(row[3]),   # low
-                float(row[4]),   # close
-                float(row[5])    # volume
-            ])
-            
+        res = requests.get(url_spot, timeout=5)
+        data = res.json()
+        if isinstance(data, list) and len(data) > 0:
+            for row in data:
+                ohlcv.append([
+                    int(row[0]), float(row[1]), float(row[2]),
+                    float(row[3]), float(row[4]), float(row[5])
+                ])
     except Exception:
-        return None, 0.0
+        pass
+
+    # 2차 시도: KORU 같은 선물(Futures) 전용 종목 대응 API
+    if not ohlcv:
+        url_futures = f"https://fapi.binance.com/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+        try:
+            res = requests.get(url_futures, timeout=5)
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                for row in data:
+                    ohlcv.append([
+                        int(row[0]), float(row[1]), float(row[2]),
+                        float(row[3]), float(row[4]), float(row[5])
+                    ])
+        except Exception:
+            return None, 0.0
 
     if not ohlcv:
         return None, 0.0
