@@ -1,5 +1,5 @@
 import re
-import ccxt
+import requests
 from google import genai
 from google.genai import types
 import pandas as pd
@@ -81,7 +81,6 @@ st.markdown(
         font-weight: 500;
     }
     
-    /* AI 리포트 개별 카드 디자인 */
     .ai-card {
         background: #FFFFFF;
         border: 1px solid #E2E8F0;
@@ -109,7 +108,7 @@ st.markdown(
 )
 
 # ---------------------------------------------------------
-# 2. 헤더 및 검색 컨트롤 (기본 종목: KORU/USDT)
+# 2. 헤더 및 검색 컨트롤
 # ---------------------------------------------------------
 st.markdown(
     """
@@ -136,39 +135,37 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 및 보조지표 계산 함수 (미국 클라우드 IP 우회 적용)
+# 3. 데이터 수집 및 보조지표 계산 함수 (Direct API 우회 적용)
 # ---------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_market_data(symbol):
-    # Streamlit Cloud (미국 AWS IP) 바이낸스 차단 우회 엔드포인트 적용
-    exchange_config = {
-        'enableRateLimit': True,
-        'timeout': 15000,
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        'urls': {
-            'api': {
-                'public': 'https://data-api.binance.vision/api/v3',
-                'fapiPublic': 'https://fapi.binance.com/fapi/v1',
-            }
-        }
-    }
+    formatted_symbol = symbol.replace('/', '').upper()
     
-    ohlcv = None
+    # 미국 IP 차단을 완전 우회하는 바이낸스 데이터 전용 Direct URL
+    url = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+    
     try:
-        # 1차 시도: 우회 전용 Spot API 데이터 수집
-        exchange = ccxt.binance(exchange_config)
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-    except Exception:
-        try:
-            # 2차 시도: 선물(Futures) API 조회
-            exchange_f = ccxt.binance({**exchange_config, 'options': {'defaultType': 'future'}})
-            ohlcv = exchange_f.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-        except Exception:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if isinstance(data, dict) and "code" in data:
             return None, 0.0
 
-    if not ohlcv or len(ohlcv) == 0:
+        ohlcv = []
+        for row in data:
+            ohlcv.append([
+                int(row[0]),     # timestamp
+                float(row[1]),   # open
+                float(row[2]),   # high
+                float(row[3]),   # low
+                float(row[4]),   # close
+                float(row[5])    # volume
+            ])
+            
+    except Exception:
+        return None, 0.0
+
+    if not ohlcv:
         return None, 0.0
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -193,8 +190,10 @@ def load_market_data(symbol):
 
     funding_rate = 0.0
     try:
-        exchange_f = ccxt.binance({**exchange_config, 'options': {'defaultType': 'future'}})
-        funding_rate = exchange_f.fetch_funding_rate(symbol)['fundingRate'] * 100
+        f_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={formatted_symbol}"
+        f_res = requests.get(f_url, timeout=5).json()
+        if isinstance(f_res, dict) and 'lastFundingRate' in f_res:
+            funding_rate = float(f_res['lastFundingRate']) * 100
     except Exception:
         funding_rate = 0.0
 
@@ -406,7 +405,7 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     # ---------------------------------------------------------
-    # 6. 업그레이드된 고도화 Gemini AI 질의응답 (개별 카드 레이아웃)
+    # 6. 업그레이드된 고도화 Gemini AI 질의응답
     # ---------------------------------------------------------
     st.markdown("### 🤖 Gemini AI 선물 전략 어드바이저")
 
@@ -421,7 +420,6 @@ else:
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
 
-                # 고도화된 수치 기반 프롬프트
                 system_instruction = f"""
 너는 바이낸스 선물 트레이딩 전문 AI 수석 전략가이다.
 제시된 실시간 시장 데이터와 질문을 분석하여, 단순 중립 지표 착시를 방지하고 손익비가 완벽히 계산된 고도화된 트레이딩 보고서를 제공하라.
@@ -462,8 +460,6 @@ else:
                 )
 
                 raw_text = response.text.strip()
-
-                # 번호(1., 2. 등) 단위로 섹션 분리
                 sections = re.split(r'\n(?=\d+\.\s)', raw_text)
 
                 for section in sections:
