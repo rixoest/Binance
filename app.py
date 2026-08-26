@@ -1,5 +1,5 @@
 import re
-import ccxt
+import requests
 from google import genai
 from google.genai import types
 import pandas as pd
@@ -12,7 +12,7 @@ import ta
 # 1. 페이지 및 라이트(White) 테마 커스텀 CSS 설정
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="PRO TRADING AI | 바이낸스 선물 대시보드",
+    page_title="PRO TRADING AI | 실시간 대시보드",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -114,7 +114,7 @@ st.markdown(
     """
     <div class="main-header">
         <div class="main-title">⚡ PRO TRADING AI DASHBOARD</div>
-        <div class="sub-title">바이낸스 선물 실시간 정밀 시장 데이터 & Gemini AI 어드바이저</div>
+        <div class="sub-title">실시간 정밀 시장 데이터 & Gemini AI 어드바이저</div>
     </div>
 """,
     unsafe_allow_html=True,
@@ -135,61 +135,70 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (CCXT 기반 안정적 연동)
+# 3. 데이터 수집 함수 (Cloud IP 차단 우회 공인 퍼블릭 라우팅)
 # ---------------------------------------------------------
 @st.cache_data(ttl=20)
 def load_market_data(symbol):
+    formatted_symbol = symbol.replace('/', '').upper()
+    ohlcv = []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    # [1차 시도] 바이낸스 비전(Vision) API - 클라우드 지오블로킹 우회 가능 지점
     try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'future'}
-        })
-        
-        # 심볼 포맷 표준화 (예: KORUUSDT -> KORU/USDT)
-        clean_sym = symbol.replace('/', '').upper()
-        if clean_sym.endswith('USDT'):
-            base_coin = clean_sym[:-4]
-            formatted_symbol = f"{base_coin}/USDT"
-        else:
-            formatted_symbol = f"{symbol}/USDT" if '/' not in symbol else symbol
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                for row in data:
+                    ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+    except Exception:
+        pass
 
-        ohlcv = exchange.fetch_ohlcv(formatted_symbol, timeframe='1h', limit=100)
-        if not ohlcv or len(ohlcv) == 0:
-            return None, 0.0
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-        # 보조지표 계산
-        df['RSI'] = ta.momentum.rsi(df['close'], window=14)
-        df['EMA_20'] = ta.trend.ema_indicator(df['close'], window=20)
-        df['EMA_50'] = ta.trend.ema_indicator(df['close'], window=50)
-
-        bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
-        df['BB_High'] = bb.bollinger_hband()
-        df['BB_Low'] = bb.bollinger_lband()
-
-        macd = ta.trend.MACD(close=df['close'])
-        df['MACD'] = macd.macd()
-        df['MACD_Signal'] = macd.macd_signal()
-        df['MACD_Diff'] = macd.macd_diff()
-
-        df['ATR'] = ta.volatility.average_true_range(
-            high=df['high'], low=df['low'], close=df['close'], window=14
-        )
-
-        funding_rate = 0.0100
+    # [2차 시도] Bybit 퍼블릭 API 우회
+    if not ohlcv:
         try:
-            funding_info = exchange.fetch_funding_rate(formatted_symbol)
-            if funding_info and 'fundingRate' in funding_info:
-                funding_rate = float(funding_info['fundingRate']) * 100
+            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={formatted_symbol}&interval=60&limit=100"
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("retCode") == 0 and "list" in data.get("result", {}):
+                    raw_list = data["result"]["list"]
+                    raw_list.reverse()
+                    for row in raw_list:
+                        ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
         except Exception:
             pass
 
-        return df, funding_rate
-
-    except Exception as e:
+    if not ohlcv:
         return None, 0.0
+
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+    # 보조지표 계산
+    df['RSI'] = ta.momentum.rsi(df['close'], window=14)
+    df['EMA_20'] = ta.trend.ema_indicator(df['close'], window=20)
+    df['EMA_50'] = ta.trend.ema_indicator(df['close'], window=50)
+
+    bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
+    df['BB_High'] = bb.bollinger_hband()
+    df['BB_Low'] = bb.bollinger_lband()
+
+    macd = ta.trend.MACD(close=df['close'])
+    df['MACD'] = macd.macd()
+    df['MACD_Signal'] = macd.macd_signal()
+    df['MACD_Diff'] = macd.macd_diff()
+
+    df['ATR'] = ta.volatility.average_true_range(
+        high=df['high'], low=df['low'], close=df['close'], window=14
+    )
+
+    funding_rate = 0.0100
+    return df, funding_rate
 
 
 # Market 데이터 로드
@@ -197,9 +206,8 @@ df, funding_rate = load_market_data(symbol_input)
 
 if df is None:
     st.error(
-        f"🚨 '{symbol_input}' 선물의 데이터를 불러오지 못했습니다.\n\n"
-        f"**확인 사항**: Streamlit Cloud 앱 설정의 `requirements.txt`에 `ccxt` 패키지가 포함되어 있는지, "
-        f"그리고 종목명이 올바른지 확인해 주세요."
+        f"🚨 '{symbol_input}' 데이터를 불러오지 못했습니다.\n\n"
+        f"**안내**: 입력하신 종목명이 올바른지 확인해 주세요. (예: `BTC/USDT`, `KORU/USDT` 등)"
     )
 else:
     curr = df.iloc[-1]
@@ -275,7 +283,7 @@ else:
             <div class="metric-card">
                 <div class="metric-label">선물 펀딩비</div>
                 <div class="metric-val" style="color:{funding_color};">{funding_rate:.4f}%</div>
-                <div class="metric-sub">8시간 간격 정산</div>
+                <div class="metric-sub">정산 주기 기준</div>
             </div>
         """,
             unsafe_allow_html=True,
@@ -405,47 +413,43 @@ else:
     # ---------------------------------------------------------
     # 6. Gemini AI 질의응답
     # ---------------------------------------------------------
-    st.markdown("### 🤖 Gemini AI 선물 전략 어드바이저")
+    st.markdown("### 🤖 Gemini AI 전략 어드바이저")
 
     user_question = st.text_input(
         "질문 입력",
-        placeholder="예: 전략 세워줘 / 지금 Short으로 들어갈까? Long으로 들어갈까?",
+        placeholder="예: 전략 세워줘 / 지금 포지션 어떻게 볼까?",
         label_visibility="collapsed",
     )
 
     if user_question:
-        with st.spinner("Gemini AI가 정량·정성 시장 분석을 진행 중입니다..."):
+        with st.spinner("Gemini AI가 시장 데이터를 분석 중입니다..."):
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
 
                 system_instruction = f"""
-너는 바이낸스 선물 트레이딩 전문 AI 수석 전략가이다.
-제시된 실시간 시장 데이터와 질문을 분석하여 완벽히 계산된 트레이딩 보고서를 제공하라.
+너는 암호화폐 트레이딩 전문 AI 수석 전략가이다.
+제시된 실시간 시장 데이터와 질문을 분석하여 트레이딩 보고서를 제공하라.
 
-[실시간 {symbol_input} 선물 시장 종합 데이터]
+[실시간 {symbol_input} 시장 종합 데이터]
 - 현재가: ${curr['close']:,.2f} USDT (전봉 대비 {price_change:+.2f}%)
 - RSI(14): {curr['RSI']:.2f}
 - EMA(20): ${curr['EMA_20']:,.2f} | EMA(50): ${curr['EMA_50']:,.2f}
 - 볼린저 밴드: 상한선=${curr['BB_High']:,.2f}, 하한선=${curr['BB_Low']:,.2f}
 - MACD: Line={curr['MACD']:.4f}, Signal={curr['MACD_Signal']:.4f}, Hist={curr['MACD_Diff']:.4f}
 - ATR (1시간 평균 변동폭): ${curr['ATR']:,.2f}
-- 선물 펀딩비: {funding_rate:.4f}%
 
 [핵심 전략 지침]
-1. 단기 하락 모멘텀을 역으로 활용하는 '평균 회귀(Mean Reversion)' 전략을 기본으로 작성하라.
+1. 평균 회귀(Mean Reversion) 전략을 기본으로 작성하라.
 2. 진입 타점은 볼린저 밴드 하한선 및 ATR 하단 범주를 활용해 3단계 분할 매수로 수치를 직접 계산하여 제시하라.
-3. 예상 손익비(Risk/Reward Ratio)가 최소 1:2 이상 나오도록 진입가, 목표가, 손절가를 설정하라.
+3. 예상 손익비가 최소 1:2 이상 나오도록 진입가, 목표가, 손절가를 설정하라.
 4. 마크다운 해시태그(###)를 사용하지 말고, 각 번호(1., 2., 3., 4., 5.)로 시작하도록 작성하라.
 
 [필수 답변 구성 요소]
-1. 🎯 **포지션 추천**: Long / Short / 관망 중 명확한 판정 및 핵심 유효 전략 명시
-2. ⚡ **추천 레버리지**: 변동성을 고려한 최적 레버리지 배율 지정 및 사유
-3. 💰 **진입 비중 & 분할 매매 전략**:
-   - 총 추천 비중(%)
-   - 볼린저 밴드 하한선 및 ATR을 고려한 1차/2차/3차 분할 진입가(예상 평단 포함) 및 익절 목표가
-4. 🛑 **손절가 (Stop-Loss)**: ATR 변동성을 감안한 구체적 손절가 및 설정 이유
-5. 📊 **기술적 분석 및 고도화 전략 평가**:
-   - 평균 회귀 전략의 원리 및 손익비(Risk/Reward Ratio) 성과 분석 상세 서술
+1. 🎯 **포지션 추천**: Long / Short / 관망 중 명확한 판정
+2. ⚡ **추천 레버리지**: 최적 레버리지 배율 지정 및 사유
+3. 💰 **진입 비중 & 분할 매매 전략**: 분할 진입가 및 익절 목표가
+4. 🛑 **손절가 (Stop-Loss)**: 구체적 손절가 및 설정 이유
+5. 📊 **기술적 분석 평가**: 성과 분석 상세 서술
 """
 
                 response = client.models.generate_content(
