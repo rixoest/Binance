@@ -12,7 +12,7 @@ import ta
 # 1. 페이지 및 라이트(White) 테마 커스텀 CSS 설정
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="PRO TRADING AI | 실시간 대시보드",
+    page_title="PRO TRADING AI | 바이낸스 선물 대시보드",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -114,7 +114,7 @@ st.markdown(
     """
     <div class="main-header">
         <div class="main-title">⚡ PRO TRADING AI DASHBOARD</div>
-        <div class="sub-title">실시간 정밀 시장 데이터 & Gemini AI 선물 매매 어드바이저</div>
+        <div class="sub-title">바이낸스 선물 실시간 정밀 시장 데이터 & Gemini AI 어드바이저</div>
     </div>
 """,
     unsafe_allow_html=True,
@@ -124,7 +124,7 @@ ctrl_col1, ctrl_col2 = st.columns([3, 1])
 
 with ctrl_col1:
     raw_symbol = st.text_input(
-        "조회 종목 심볼", value="BTC/USDT", label_visibility="collapsed"
+        "조회 종목 심볼", value="KORU/USDT", label_visibility="collapsed"
     )
     symbol_input = raw_symbol.strip().upper()
 
@@ -135,21 +135,23 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (Geo-blocking 방지 다중 우회망)
+# 3. 데이터 수집 함수 (Cloud IP 차단 우회 미러 도메인 적용)
 # ---------------------------------------------------------
 @st.cache_data(ttl=20)
 def load_market_data(symbol):
+    # 바이낸스 선물용 심볼 포맷팅 (슬래시 제거: KORUUSDT)
     formatted_symbol = symbol.replace('/', '').upper()
     ohlcv = []
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
     }
 
-    # [1차 시도] Binance Public Data Vision (차단 무풍지대)
+    # [1차 시도] 바이낸스 선물 공식 대체 미러 엔드포인트 (Cloud 우회용)
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
-        res = requests.get(url, headers=headers, timeout=4)
+        url = f"https://fapi.binance.info/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, list) and len(data) > 0:
@@ -158,31 +160,29 @@ def load_market_data(symbol):
     except Exception:
         pass
 
-    # [2차 시도] Bybit Public API (미국 IP Geo-Blocking 없음)
+    # [2차 시도] CORS 우회 게이트웨이를 통한 바이낸스 선물 메인 API 접속
     if not ohlcv:
         try:
-            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={formatted_symbol}&interval=60&limit=100"
-            res = requests.get(url, headers=headers, timeout=4)
+            url = f"https://proxy.cors.sh/https://fapi.binance.com/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+            res = requests.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
                 data = res.json()
-                if data.get("retCode") == 0 and "list" in data.get("result", {}):
-                    raw_list = data["result"]["list"]
-                    raw_list.reverse() # Bybit는 최신순이므로 반전
-                    for row in raw_list:
+                if isinstance(data, list) and len(data) > 0:
+                    for row in data:
                         ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
         except Exception:
             pass
 
-    # [3차 시도] OKX Public API
+    # [3차 시도] 백업용 Bybit 선물 API 매칭
     if not ohlcv:
         try:
-            okx_symbol = symbol.replace('/', '-').upper()
-            url = f"https://www.okx.com/api/v5/market/candles?instId={okx_symbol}&bar=1H&limit=100"
-            res = requests.get(url, headers=headers, timeout=4)
+            bybit_symbol = symbol.replace('/', '').upper()
+            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={bybit_symbol}&interval=60&limit=100"
+            res = requests.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
                 data = res.json()
-                if data.get("code") == "0" and "data" in data:
-                    raw_list = data["data"]
+                if data.get("retCode") == 0 and "list" in data.get("result", {}):
+                    raw_list = data["result"]["list"]
                     raw_list.reverse()
                     for row in raw_list:
                         ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
@@ -213,7 +213,16 @@ def load_market_data(symbol):
         high=df['high'], low=df['low'], close=df['close'], window=14
     )
 
-    funding_rate = 0.0100 # 기본값
+    # 펀딩비 조회
+    funding_rate = 0.0100
+    try:
+        f_url = f"https://fapi.binance.info/fapi/v1/premiumIndex?symbol={formatted_symbol}"
+        f_res = requests.get(f_url, headers=headers, timeout=3).json()
+        if isinstance(f_res, dict) and 'lastFundingRate' in f_res:
+            funding_rate = float(f_res['lastFundingRate']) * 100
+    except Exception:
+        pass
+
     return df, funding_rate
 
 
@@ -221,11 +230,10 @@ def load_market_data(symbol):
 df, funding_rate = load_market_data(symbol_input)
 
 if df is None:
-    st.warning(
-        f"⚠️ '{symbol_input}' 심볼 데이터를 불러올 수 없습니다.\n\n"
-        f"**해결 방법**:\n"
-        f"1. 심볼명이 존재하는지 확인해 보세요. (예: `BTC/USDT`, `ETH/USDT`, `SOL/USDT`, `XRP/USDT`)\n"
-        f"2. 바이낸스/바이비트/OKX 거래소에 상장되어 있는 정확한 티커인지 확인해 주세요."
+    st.error(
+        f"🚨 '{symbol_input}' 선물의 데이터를 Streamlit Cloud에서 불러오지 못했습니다.\n\n"
+        f"**원인**: Streamlit Cloud 서버 IP 대역에 대한 바이낸스 API의 가상 차단 문제입니다.\n"
+        f"**해결책**: [실시간 데이터 갱신] 버튼을 누르거나, 잠시 후 다시 시도해 주세요."
     )
 else:
     curr = df.iloc[-1]
@@ -445,16 +453,17 @@ else:
                 client = genai.Client(api_key=GEMINI_API_KEY)
 
                 system_instruction = f"""
-너는 암호화폐 선물 트레이딩 전문 AI 수석 전략가이다.
+너는 바이낸스 선물 트레이딩 전문 AI 수석 전략가이다.
 제시된 실시간 시장 데이터와 질문을 분석하여 완벽히 계산된 트레이딩 보고서를 제공하라.
 
-[실시간 {symbol_input} 시장 종합 데이터]
+[실시간 {symbol_input} 선물 시장 종합 데이터]
 - 현재가: ${curr['close']:,.2f} USDT (전봉 대비 {price_change:+.2f}%)
 - RSI(14): {curr['RSI']:.2f}
 - EMA(20): ${curr['EMA_20']:,.2f} | EMA(50): ${curr['EMA_50']:,.2f}
 - 볼린저 밴드: 상한선=${curr['BB_High']:,.2f}, 하한선=${curr['BB_Low']:,.2f}
 - MACD: Line={curr['MACD']:.4f}, Signal={curr['MACD_Signal']:.4f}, Hist={curr['MACD_Diff']:.4f}
 - ATR (1시간 평균 변동폭): ${curr['ATR']:,.2f}
+- 선물 펀딩비: {funding_rate:.4f}%
 
 [핵심 전략 지침]
 1. 단기 하락 모멘텀을 역으로 활용하는 '평균 회귀(Mean Reversion)' 전략을 기본으로 작성하라.
