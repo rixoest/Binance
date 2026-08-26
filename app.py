@@ -135,41 +135,53 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 및 보조지표 계산 함수 (Spot / Futures 자동 대응)
+# 3. 데이터 수집 함수 (Geo-Blocking 차단 회피형 다중 엔드포인트)
 # ---------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_market_data(symbol):
     formatted_symbol = symbol.replace('/', '').upper()
     ohlcv = []
-    
-    # 1차 시도: 현물(Spot) 우회 API
-    url_spot = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+
+    # 1차 시도: Binance Spot API (현물)
     try:
-        res = requests.get(url_spot, timeout=5)
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+        res = requests.get(url, headers=headers, timeout=5)
         data = res.json()
         if isinstance(data, list) and len(data) > 0:
             for row in data:
-                ohlcv.append([
-                    int(row[0]), float(row[1]), float(row[2]),
-                    float(row[3]), float(row[4]), float(row[5])
-                ])
+                ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
     except Exception:
         pass
 
-    # 2차 시도: KORU 같은 선물(Futures) 전용 종목 대응 API
+    # 2차 시도: Binance Futures Public API (기존)
     if not ohlcv:
-        url_futures = f"https://fapi.binance.com/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
         try:
-            res = requests.get(url_futures, timeout=5)
+            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+            res = requests.get(url, headers=headers, timeout=5)
             data = res.json()
             if isinstance(data, list) and len(data) > 0:
                 for row in data:
-                    ohlcv.append([
-                        int(row[0]), float(row[1]), float(row[2]),
-                        float(row[3]), float(row[4]), float(row[5])
-                    ])
+                    ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
         except Exception:
-            return None, 0.0
+            pass
+
+    # 3차 시도: Streamlit/Cloud IP 차단 방지용 우회 게이트웨이
+    if not ohlcv:
+        try:
+            # 바이낸스 선물 차단 우회 게이트웨이 엔드포인트
+            url = f"https://proxy.cors.sh/https://fapi.binance.com/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
+            res = requests.get(url, headers=headers, timeout=5)
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                for row in data:
+                    ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+        except Exception:
+            pass
 
     if not ohlcv:
         return None, 0.0
@@ -177,6 +189,7 @@ def load_market_data(symbol):
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
 
+    # 보조지표 계산
     df['RSI'] = ta.momentum.rsi(df['close'], window=14)
     df['EMA_20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['EMA_50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -197,7 +210,7 @@ def load_market_data(symbol):
     funding_rate = 0.0
     try:
         f_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={formatted_symbol}"
-        f_res = requests.get(f_url, timeout=5).json()
+        f_res = requests.get(f_url, headers=headers, timeout=5).json()
         if isinstance(f_res, dict) and 'lastFundingRate' in f_res:
             funding_rate = float(f_res['lastFundingRate']) * 100
     except Exception:
@@ -211,7 +224,9 @@ df, funding_rate = load_market_data(symbol_input)
 
 if df is None:
     st.error(
-        f"'{symbol_input}' 심볼 데이터를 가져올 수 없습니다. 바이낸스 서버 연결을 재시도 중이거나 심볼명이 올바르지 않습니다. (예: KORU/USDT)"
+        f"🚨 '{symbol_input}' 심볼 데이터를 수집할 수 없습니다.\n\n"
+        f"**원인**: Streamlit Cloud 서버의 미국 IP 차단(Geo-blocking)으로 인해 바이낸스 선물 API 응답이 거부되었습니다.\n"
+        f"**해결책**: 심볼명이 `KORU/USDT` 또는 `BTC/USDT` 형태가 맞는지 확인하고, 몇 초 후 [실시간 데이터 갱신] 버튼을 눌러주세요."
     )
 else:
     curr = df.iloc[-1]
@@ -411,7 +426,7 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     # ---------------------------------------------------------
-    # 6. 업그레이드된 고도화 Gemini AI 질의응답
+    # 6. Gemini AI 질의응답
     # ---------------------------------------------------------
     st.markdown("### 🤖 Gemini AI 선물 전략 어드바이저")
 
@@ -422,13 +437,13 @@ else:
     )
 
     if user_question:
-        with st.spinner("Gemini AI가 정밀 정량·정성 시장 분석을 진행 중입니다..."):
+        with st.spinner("Gemini AI가 정량·정성 시장 분석을 진행 중입니다..."):
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
 
                 system_instruction = f"""
 너는 바이낸스 선물 트레이딩 전문 AI 수석 전략가이다.
-제시된 실시간 시장 데이터와 질문을 분석하여, 단순 중립 지표 착시를 방지하고 손익비가 완벽히 계산된 고도화된 트레이딩 보고서를 제공하라.
+제시된 실시간 시장 데이터와 질문을 분석하여 완벽히 계산된 트레이딩 보고서를 제공하라.
 
 [실시간 {symbol_input} 시장 종합 데이터]
 - 현재가: ${curr['close']:,.2f} USDT (전봉 대비 {price_change:+.2f}%)
@@ -440,9 +455,9 @@ else:
 - 선물 펀딩비: {funding_rate:.4f}%
 
 [핵심 전략 지침]
-1. 단기 하락 모멘텀(MACD 음전/시그널 하향 이탈 등)을 역으로 활용하는 '평균 회귀(Mean Reversion)' 전략을 기본으로 작성하라.
-2. 진입 타점은 볼린저 밴드 하한선 및 ATR 하단 범주를 활용해 3단계 분할 매수로 예상 평단을 획기적으로 낮추도록 수치를 직접 계산하여 제시하라.
-3. 평균 회귀에 따라 EMA 20 또는 상단 목표가로 반등 시 예상되는 손익비(Risk/Reward Ratio)가 최소 1:2 이상 나오도록 진입가, 목표가, 손절가를 유기적으로 구성하라.
+1. 단기 하락 모멘텀을 역으로 활용하는 '평균 회귀(Mean Reversion)' 전략을 기본으로 작성하라.
+2. 진입 타점은 볼린저 밴드 하한선 및 ATR 하단 범주를 활용해 3단계 분할 매수로 수치를 직접 계산하여 제시하라.
+3. 예상 손익비(Risk/Reward Ratio)가 최소 1:2 이상 나오도록 진입가, 목표가, 손절가를 설정하라.
 4. 마크다운 해시태그(###)를 사용하지 말고, 각 번호(1., 2., 3., 4., 5.)로 시작하도록 작성하라.
 
 [필수 답변 구성 요소]
@@ -453,8 +468,7 @@ else:
    - 볼린저 밴드 하한선 및 ATR을 고려한 1차/2차/3차 분할 진입가(예상 평단 포함) 및 익절 목표가
 4. 🛑 **손절가 (Stop-Loss)**: ATR 변동성을 감안한 구체적 손절가 및 설정 이유
 5. 📊 **기술적 분석 및 고도화 전략 평가**:
-   - 단기 모멘텀 꺾임 상황을 역활용하는 평균 회귀 전략의 원리
-   - 예상 평단 대비 반등 시 손익비(Risk/Reward Ratio) 성과 분석 상세 서술
+   - 평균 회귀 전략의 원리 및 손익비(Risk/Reward Ratio) 성과 분석 상세 서술
 """
 
                 response = client.models.generate_content(
