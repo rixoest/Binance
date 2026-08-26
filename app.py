@@ -136,31 +136,36 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 및 보조지표 계산 함수 (클라우드 IP 차단 방지 적용)
+# 3. 데이터 수집 및 보조지표 계산 함수 (미국 클라우드 IP 우회 적용)
 # ---------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_market_data(symbol):
-    # 바이낸스 연결 설정 (User-Agent 및 타임아웃 우회 설정)
+    # Streamlit Cloud (미국 AWS IP) 바이낸스 차단 우회 엔드포인트 적용
     exchange_config = {
         'enableRateLimit': True,
         'timeout': 15000,
         'headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        'urls': {
+            'api': {
+                'public': 'https://data-api.binance.vision/api/v3',
+                'fapiPublic': 'https://fapi.binance.com/fapi/v1',
+            }
         }
     }
     
     ohlcv = None
     try:
-        # 1차 시도: 선물(Futures) API 조회
-        exchange_f = ccxt.binance({**exchange_config, 'options': {'defaultType': 'future'}})
-        ohlcv = exchange_f.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        # 1차 시도: 우회 전용 Spot API 데이터 수집
+        exchange = ccxt.binance(exchange_config)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
     except Exception:
         try:
-            # 2차 시도: 현물(Spot) API 재시도
-            exchange = ccxt.binance(exchange_config)
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+            # 2차 시도: 선물(Futures) API 조회
+            exchange_f = ccxt.binance({**exchange_config, 'options': {'defaultType': 'future'}})
+            ohlcv = exchange_f.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         except Exception:
-            # 네트워크 차단 시 오류 화면 방지용 예외 처리
             return None, 0.0
 
     if not ohlcv or len(ohlcv) == 0:
