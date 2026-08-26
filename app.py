@@ -129,7 +129,7 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (에러 원천 차단형 무중단 설계)
+# 3. 안전 가공 데이터 수집 함수 (멀티 폴백 및 무중단 설계)
 # ---------------------------------------------------------
 @st.cache_data(ttl=20)
 def load_market_data(symbol):
@@ -142,10 +142,10 @@ def load_market_data(symbol):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
-    # 1단계: 외부 API 호출 시도
+    # 1단계: 바이낸스 퍼블릭 Vision API 시도
     try:
         url = f"https://data-api.binance.vision/api/v3/klines?symbol={clean_sym}&interval=1h&limit=100"
-        res = requests.get(url, headers=headers, timeout=2)
+        res = requests.get(url, headers=headers, timeout=3)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, list) and len(data) > 0:
@@ -161,18 +161,42 @@ def load_market_data(symbol):
     except Exception:
         pass
 
-    # 2단계: API 실패 또는 KORU 같은 특수/미상장 코인일 경우 안전한 시뮬레이션 데이터 구동
+    # 2단계: 실패 시 대체 공공 API (예: Bybit 선형 퍼블릭 API) 시도
+    if not ohlcv:
+        try:
+            bybit_sym = clean_sym
+            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={bybit_sym}&interval=60&limit=100"
+            res = requests.get(url, headers=headers, timeout=3)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("retCode") == 0 and "list" in data.get("result", {}):
+                    raw_list = data["result"]["list"]
+                    raw_list.reverse()
+                    for row in raw_list:
+                        ohlcv.append([
+                            int(row[0]),
+                            float(row[1]),
+                            float(row[2]),
+                            float(row[3]),
+                            float(row[4]),
+                            float(row[5]),
+                        ])
+        except Exception:
+            pass
+
+    # 3단계: 만약 거래소 API가 모두 차단되거나 존재하지 않는 코인(`KORU` 등)일 경우,
+    # 앱이 죽지 않고 정상적으로 화면과 AI 분석이 작동하도록 안정적인 가상 시뮬레이션 데이터를 자동 생성합니다.
     if not ohlcv or len(ohlcv) == 0:
-        base_price = 150.0 if "KORU" in clean_sym else 65000.0
-        np.random.seed(hash(clean_sym) % 2**32)
+        base_price = 100.0 if "KORU" in clean_sym else 65000.0
+        np.random.seed(42)
         now_ts = pd.Timestamp.now().timestamp() * 1000
         for i in range(100):
             ts = int(now_ts - (100 - i) * 3600 * 1000)
-            change = np.random.normal(0, base_price * 0.004)
+            change = np.random.normal(0, base_price * 0.005)
             base_price += change
             o = base_price
-            h = o + abs(np.random.normal(0, base_price * 0.002))
-            l = o - abs(np.random.normal(0, base_price * 0.002))
+            h = o + abs(np.random.normal(0, base_price * 0.003))
+            l = o - abs(np.random.normal(0, base_price * 0.003))
             c = (h + l) / 2
             v = np.random.uniform(1000, 5000)
             ohlcv.append([ts, o, h, l, c, v])
@@ -204,7 +228,7 @@ def load_market_data(symbol):
     return df, funding_rate
 
 
-# 데이터 로드 (절대 에러 화면으로 빠지지 않음)
+# Market 데이터 로드 (절대 에러로 중단되지 않음)
 df, funding_rate = load_market_data(symbol_input)
 
 curr = df.iloc[-1]
