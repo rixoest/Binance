@@ -136,31 +136,37 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 및 보조지표 계산 함수
+# 3. 데이터 수집 및 보조지표 계산 함수 (클라우드 IP 차단 방지 적용)
 # ---------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_market_data(symbol):
-    exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
-
+    # 바이낸스 연결 설정 (User-Agent 및 타임아웃 우회 설정)
+    exchange_config = {
+        'enableRateLimit': True,
+        'timeout': 15000,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+    }
+    
     ohlcv = None
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-    except Exception:
-        exchange_f = ccxt.binance(
-            {
-                'enableRateLimit': True,
-                'timeout': 10000,
-                'options': {'defaultType': 'future'},
-            }
-        )
+        # 1차 시도: 선물(Futures) API 조회
+        exchange_f = ccxt.binance({**exchange_config, 'options': {'defaultType': 'future'}})
         ohlcv = exchange_f.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+    except Exception:
+        try:
+            # 2차 시도: 현물(Spot) API 재시도
+            exchange = ccxt.binance(exchange_config)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        except Exception:
+            # 네트워크 차단 시 오류 화면 방지용 예외 처리
+            return None, 0.0
 
     if not ohlcv or len(ohlcv) == 0:
         return None, 0.0
 
-    df = pd.DataFrame(
-        ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-    )
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
 
     df['RSI'] = ta.momentum.rsi(df['close'], window=14)
@@ -182,16 +188,8 @@ def load_market_data(symbol):
 
     funding_rate = 0.0
     try:
-        exchange_f = ccxt.binance(
-            {
-                'enableRateLimit': True,
-                'timeout': 10000,
-                'options': {'defaultType': 'future'},
-            }
-        )
-        funding_rate = (
-            exchange_f.fetch_funding_rate(symbol)['fundingRate'] * 100
-        )
+        exchange_f = ccxt.binance({**exchange_config, 'options': {'defaultType': 'future'}})
+        funding_rate = exchange_f.fetch_funding_rate(symbol)['fundingRate'] * 100
     except Exception:
         funding_rate = 0.0
 
@@ -203,7 +201,7 @@ df, funding_rate = load_market_data(symbol_input)
 
 if df is None:
     st.error(
-        f"'{symbol_input}' 심볼 데이터를 가져올 수 없습니다. 심볼명을 다시 확인해주세요. (예: KORU/USDT)"
+        f"'{symbol_input}' 심볼 데이터를 가져올 수 없습니다. 바이낸스 서버 연결을 재시도 중이거나 심볼명이 올바르지 않습니다. (예: KORU/USDT)"
     )
 else:
     curr = df.iloc[-1]
@@ -418,7 +416,7 @@ else:
             try:
                 client = genai.Client(api_key=GEMINI_API_KEY)
 
-                # 고도화된 전략 프롬프트 반영
+                # 고도화된 수치 기반 프롬프트
                 system_instruction = f"""
 너는 바이낸스 선물 트레이딩 전문 AI 수석 전략가이다.
 제시된 실시간 시장 데이터와 질문을 분석하여, 단순 중립 지표 착시를 방지하고 손익비가 완벽히 계산된 고도화된 트레이딩 보고서를 제공하라.
