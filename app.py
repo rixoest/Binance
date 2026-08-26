@@ -120,6 +120,7 @@ with ctrl_col1:
     raw_symbol = st.text_input(
         "조회 종목 심볼", value="KORU/USDT", label_visibility="collapsed"
     )
+    # 입력값을 대문자로 변환하고 공백 제거 후 슬래시(/) 명확히 처리
     symbol_input = raw_symbol.strip().upper()
 
 with ctrl_col2:
@@ -129,11 +130,12 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (캐시 차단 및 실시간 강제 연동)
+# 3. 데이터 수집 함수 (심볼 정제 및 캐시 차단 강화)
 # ---------------------------------------------------------
 @st.cache_data(ttl=0)
 def load_market_data(symbol):
-    clean_sym = symbol.replace("/", "").upper()
+    # 슬래시 및 공백을 완벽히 제거하여 바이낸스 표준 심볼 포맷(KORUUSDT)으로 빌드
+    clean_sym = symbol.replace("/", "").replace(" ", "").upper()
     if not clean_sym.endswith("USDT"):
         clean_sym += "USDT"
 
@@ -143,7 +145,7 @@ def load_market_data(symbol):
         "Accept": "application/json",
     }
 
-    # 1단계: 글로벌 우회 API (AllOrigins 프록시를 통해 바이낸스 선물 데이터 실시간 직조회)
+    # 1단계: 글로벌 우회 API (AllOrigins 프록시를 통해 바이낸스 선물 데이터 직조회)
     try:
         target_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_sym}&interval=1h&limit=100"
         proxy_url = f"https://api.allorigins.win/get?url={requests.utils.quote(target_url)}"
@@ -499,7 +501,7 @@ if df is not None:
 """
 
                 response = client.models.generate_content(
-                    model='gemini-3.6-flash',
+                    model='gemini-2.5-flash',
                     contents=user_question,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction
