@@ -1,5 +1,5 @@
 import re
-import requests
+import ccxt
 from google import genai
 from google.genai import types
 import pandas as pd
@@ -120,7 +120,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ctrl_col1, ctrl_col2 = st.columns([3, 1])
+ctrl_col1, ctrl_col2 = alt_col1, alt_col2 = st.columns([3, 1])
 
 with ctrl_col1:
     raw_symbol = st.text_input(
@@ -135,95 +135,61 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (Cloud IP 차단 우회 미러 도메인 적용)
+# 3. 데이터 수집 함수 (CCXT 라이브러리 기반 안정적 연동)
 # ---------------------------------------------------------
 @st.cache_data(ttl=20)
 def load_market_data(symbol):
-    # 바이낸스 선물용 심볼 포맷팅 (슬래시 제거: KORUUSDT)
-    formatted_symbol = symbol.replace('/', '').upper()
-    ohlcv = []
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
-
-    # [1차 시도] 바이낸스 선물 공식 대체 미러 엔드포인트 (Cloud 우회용)
     try:
-        url = f"https://fapi.binance.info/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                for row in data:
-                    ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
-    except Exception:
-        pass
+        # 바이낸스 선물 거래소 객체 초기화 (공개 API 모드)
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'future'}
+        })
+        
+        # 심볼 포맷 정리 (예: KORU/USDT)
+        if '/' not in symbol:
+            if symbol.endswith('USDT'):
+                symbol = symbol[:-4] + '/USDT'
+        
+        # OHLCV 데이터 1시간봉 100개 로드
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        if not ohlcv or len(ohlcv) == 0:
+            return None, 0.0
 
-    # [2차 시도] CORS 우회 게이트웨이를 통한 바이낸스 선물 메인 API 접속
-    if not ohlcv:
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+        # 보조지표 계산
+        df['RSI'] = ta.momentum.rsi(df['close'], window=14)
+        df['EMA_20'] = ta.trend.ema_indicator(df['close'], window=20)
+        df['EMA_50'] = ta.trend.ema_indicator(df['close'], window=50)
+
+        bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
+        df['BB_High'] = bb.bollinger_hband()
+        df['BB_Low'] = bb.bollinger_lband()
+
+        macd = ta.trend.MACD(close=df['close'])
+        df['MACD'] = macd.macd()
+        df['MACD_Signal'] = macd.macd_signal()
+        df['MACD_Diff'] = macd.macd_diff()
+
+        df['ATR'] = ta.volatility.average_true_range(
+            high=df['high'], low=df['low'], close=df['close'], window=14
+        )
+
+        # 펀딩비 조회 시도
+        funding_rate = 0.0100
         try:
-            url = f"https://proxy.cors.sh/https://fapi.binance.com/fapi/v1/klines?symbol={formatted_symbol}&interval=1h&limit=100"
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                if isinstance(data, list) and len(data) > 0:
-                    for row in data:
-                        ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+            funding_info = exchange.fetch_funding_rate(symbol)
+            if funding_info and 'fundingRate' in funding_info:
+                funding_rate = float(funding_info['fundingRate']) * 100
         except Exception:
             pass
 
-    # [3차 시도] 백업용 Bybit 선물 API 매칭
-    if not ohlcv:
-        try:
-            bybit_symbol = symbol.replace('/', '').upper()
-            url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={bybit_symbol}&interval=60&limit=100"
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("retCode") == 0 and "list" in data.get("result", {}):
-                    raw_list = data["result"]["list"]
-                    raw_list.reverse()
-                    for row in raw_list:
-                        ohlcv.append([int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
-        except Exception:
-            pass
+        return df, funding_rate
 
-    if not ohlcv:
+    except Exception as e:
         return None, 0.0
-
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-    # 보조지표 계산
-    df['RSI'] = ta.momentum.rsi(df['close'], window=14)
-    df['EMA_20'] = ta.trend.ema_indicator(df['close'], window=20)
-    df['EMA_50'] = ta.trend.ema_indicator(df['close'], window=50)
-
-    bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
-    df['BB_High'] = bb.bollinger_hband()
-    df['BB_Low'] = bb.bollinger_lband()
-
-    macd = ta.trend.MACD(close=df['close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
-    df['MACD_Diff'] = macd.macd_diff()
-
-    df['ATR'] = ta.volatility.average_true_range(
-        high=df['high'], low=df['low'], close=df['close'], window=14
-    )
-
-    # 펀딩비 조회
-    funding_rate = 0.0100
-    try:
-        f_url = f"https://fapi.binance.info/fapi/v1/premiumIndex?symbol={formatted_symbol}"
-        f_res = requests.get(f_url, headers=headers, timeout=3).json()
-        if isinstance(f_res, dict) and 'lastFundingRate' in f_res:
-            funding_rate = float(f_res['lastFundingRate']) * 100
-    except Exception:
-        pass
-
-    return df, funding_rate
 
 
 # Market 데이터 로드
@@ -231,9 +197,9 @@ df, funding_rate = load_market_data(symbol_input)
 
 if df is None:
     st.error(
-        f"🚨 '{symbol_input}' 선물의 데이터를 Streamlit Cloud에서 불러오지 못했습니다.\n\n"
-        f"**원인**: Streamlit Cloud 서버 IP 대역에 대한 바이낸스 API의 가상 차단 문제입니다.\n"
-        f"**해결책**: [실시간 데이터 갱신] 버튼을 누르거나, 잠시 후 다시 시도해 주세요."
+        f"🚨 '{symbol_input}' 선물의 데이터를 불러오지 못했습니다.\n\n"
+        f"**조치 사항**: Streamlit Cloud 환경에서 `ccxt` 라이브러리를 통해 접근 중입니다. "
+        f"앱의 **Requirements** 파일에 `ccxt` 패키지가 포함되어 있는지 확인해 주세요."
     )
 else:
     curr = df.iloc[-1]
