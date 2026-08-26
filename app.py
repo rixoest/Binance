@@ -118,7 +118,7 @@ ctrl_col1, ctrl_col2 = st.columns([3, 1])
 
 with ctrl_col1:
     raw_symbol = st.text_input(
-        "조회 종목 심볼", value="KORU/USDT", label_visibility="collapsed"
+        "조회 종목 심볼", value="KORUUSDT", label_visibility="collapsed"
     )
     # 입력값을 대문자로 변환하고 공백 제거 후 슬래시(/) 명확히 처리
     symbol_input = raw_symbol.strip().upper()
