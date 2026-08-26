@@ -124,7 +124,7 @@ ctrl_col1, ctrl_col2 = st.columns([3, 1])
 
 with ctrl_col1:
     raw_symbol = st.text_input(
-        "조회 종목 심볼", value="KORU/USDT", label_visibility="collapsed"
+        "조회 종목 심볼", value="BTC/USDT", label_visibility="collapsed"
     )
     symbol_input = raw_symbol.strip().upper()
 
