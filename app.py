@@ -129,9 +129,9 @@ with ctrl_col2:
 
 
 # ---------------------------------------------------------
-# 3. 데이터 수집 함수 (바이낸스 선물 실제 데이터 연동)
+# 3. 데이터 수집 함수 (캐시 차단 및 실시간 강제 연동)
 # ---------------------------------------------------------
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=0)
 def load_market_data(symbol):
     clean_sym = symbol.replace("/", "").upper()
     if not clean_sym.endswith("USDT"):
@@ -143,26 +143,51 @@ def load_market_data(symbol):
         "Accept": "application/json",
     }
 
-    # 1단계: 바이낸스 선물(Futures) 퍼블릭 API 우회 호출
+    # 1단계: 글로벌 우회 API (AllOrigins 프록시를 통해 바이낸스 선물 데이터 실시간 직조회)
     try:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_sym}&interval=1h&limit=100"
-        res = requests.get(url, headers=headers, timeout=4)
+        target_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_sym}&interval=1h&limit=100"
+        proxy_url = f"https://api.allorigins.win/get?url={requests.utils.quote(target_url)}"
+        res = requests.get(proxy_url, timeout=5)
         if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                for row in data:
-                    ohlcv.append([
-                        int(row[0]),
-                        float(row[1]),
-                        float(row[2]),
-                        float(row[3]),
-                        float(row[4]),
-                        float(row[5]),
-                    ])
+            import json
+
+            contents = res.json().get("contents")
+            if contents:
+                data = json.loads(contents)
+                if isinstance(data, list) and len(data) > 0:
+                    for row in data:
+                        ohlcv.append([
+                            int(row[0]),
+                            float(row[1]),
+                            float(row[2]),
+                            float(row[3]),
+                            float(row[4]),
+                            float(row[5]),
+                        ])
     except Exception:
         pass
 
-    # 2단계: 선물 API가 막힐 경우 바이낸스 현물/미러 API 시도
+    # 2단계: 다이렉트 바이낸스 선물 퍼블릭 API 시도
+    if not ohlcv:
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={clean_sym}&interval=1h&limit=100"
+            res = requests.get(url, headers=headers, timeout=4)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    for row in data:
+                        ohlcv.append([
+                            int(row[0]),
+                            float(row[1]),
+                            float(row[2]),
+                            float(row[3]),
+                            float(row[4]),
+                            float(row[5]),
+                        ])
+        except Exception:
+            pass
+
+    # 3단계: 바이낸스 비전 미러 API 시도
     if not ohlcv:
         try:
             url = f"https://data-api.binance.vision/api/v3/klines?symbol={clean_sym}&interval=1h&limit=100"
@@ -182,7 +207,7 @@ def load_market_data(symbol):
         except Exception:
             pass
 
-    # 3단계: 펀딩비 조회 시도 (실제 바이낸스 선물 펀딩비)
+    # 펀딩비 조회
     funding_rate = 0.0100
     try:
         f_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={clean_sym}"
@@ -194,21 +219,11 @@ def load_market_data(symbol):
     except Exception:
         pass
 
-    # 최종 방어: 거래소 데이터가 모두 차단되는 최악의 경우에만 실제 코인 시세 기준에 맞춘 현실적 데이터 생성
     if not ohlcv or len(ohlcv) == 0:
-        base_price = 20.41 if "KORU" in clean_sym else 65000.0
-        np.random.seed(42)
-        now_ts = pd.Timestamp.now().timestamp() * 1000
-        for i in range(100):
-            ts = int(now_ts - (100 - i) * 3600 * 1000)
-            change = np.random.normal(0, base_price * 0.002)
-            base_price += change
-            o = base_price
-            h = o + abs(np.random.normal(0, base_price * 0.001))
-            l = o - abs(np.random.normal(0, base_price * 0.001))
-            c = (h + l) / 2
-            v = np.random.uniform(10000, 50000)
-            ohlcv.append([ts, o, h, l, c, v])
+        st.error(
+            f"🚨 '{clean_sym}' 데이터를 불러오지 못했습니다. 심볼명을 다시 확인해 주세요."
+        )
+        return None, 0.0
 
     df = pd.DataFrame(
         ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
@@ -239,217 +254,224 @@ def load_market_data(symbol):
 # 데이터 로드
 df, funding_rate = load_market_data(symbol_input)
 
-curr = df.iloc[-1]
-prev = df.iloc[-2]
-price_change = ((curr["close"] - prev["close"]) / prev["close"]) * 100
+if df is not None:
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    price_change = ((curr["close"] - prev["close"]) / prev["close"]) * 100
 
-# ---------------------------------------------------------
-# 4. 카드형 대시보드
-# ---------------------------------------------------------
-m1, m2, m3, m4, m5 = st.columns(5)
-color_change = "#16A34A" if price_change >= 0 else "#DC2626"
+    # ---------------------------------------------------------
+    # 4. 카드형 대시보드
+    # ---------------------------------------------------------
+    m1, m2, m3, m4, m5 = st.columns(5)
+    color_change = "#16A34A" if price_change >= 0 else "#DC2626"
 
-with m1:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">{symbol_input} 현재가</div>
-            <div class="metric-val">${curr['close']:,.2f}</div>
-            <div style="color:{color_change}; font-size:0.9rem; font-weight:700;">{price_change:+.2f}%</div>
-        </div>
-    """,
-        unsafe_allow_html=True,
+    with m1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">{symbol_input} 현재가</div>
+                <div class="metric-val">${curr['close']:,.2f}</div>
+                <div style="color:{color_change}; font-size:0.9rem; font-weight:700;">{price_change:+.2f}%</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with m2:
+        rsi_val = curr["RSI"] if pd.notnull(curr["RSI"]) else 50.0
+        rsi_color = (
+            "#DC2626"
+            if rsi_val >= 70
+            else ("#16A34A" if rsi_val <= 30 else "#D97706")
+        )
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">RSI (14)</div>
+                <div class="metric-val" style="color:{rsi_color};">{rsi_val:.1f}</div>
+                <div class="metric-sub">과매수(70) / 과매도(30)</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with m3:
+        ema_val = curr["EMA_20"] if pd.notnull(curr["EMA_20"]) else curr["close"]
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">EMA (20)</div>
+                <div class="metric-val" style="color: #2563EB;">${ema_val:,.2f}</div>
+                <div class="metric-sub">단기 핵심 지지선</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with m4:
+        atr_val = curr["ATR"] if pd.notnull(curr["ATR"]) else 0.0
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">ATR (1H 변동폭)</div>
+                <div class="metric-val" style="color: #475569;">${atr_val:,.2f}</div>
+                <div class="metric-sub">손절/목표가 산정 지표</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with m5:
+        funding_color = "#16A34A" if funding_rate >= 0 else "#DC2626"
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">선물 펀딩비</div>
+                <div class="metric-val" style="color:{funding_color};">{funding_rate:.4f}%</div>
+                <div class="metric-sub">정산 주기 기준</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    st.write("")
+
+    # ---------------------------------------------------------
+    # 5. 차트 시각화
+    # ---------------------------------------------------------
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.7, 0.3],
     )
 
-with m2:
-    rsi_val = curr["RSI"] if pd.notnull(curr["RSI"]) else 50.0
-    rsi_color = (
-        "#DC2626" if rsi_val >= 70 else ("#16A34A" if rsi_val <= 30 else "#D97706")
+    fig.add_trace(
+        go.Candlestick(
+            x=df["datetime"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="Price",
+            increasing_line_color="#16A34A",
+            decreasing_line_color="#DC2626",
+        ),
+        row=1,
+        col=1,
     )
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">RSI (14)</div>
-            <div class="metric-val" style="color:{rsi_color};">{rsi_val:.1f}</div>
-            <div class="metric-sub">과매수(70) / 과매도(30)</div>
-        </div>
-    """,
-        unsafe_allow_html=True,
+    fig.add_trace(
+        go.Scatter(
+            x=df["datetime"],
+            y=df["EMA_20"],
+            line=dict(color="#2563EB", width=1.5),
+            name="EMA 20",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["datetime"],
+            y=df["EMA_50"],
+            line=dict(color="#9333EA", width=1.5),
+            name="EMA 50",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["datetime"],
+            y=df["BB_High"],
+            line=dict(color="rgba(100,116,139,0.5)", dash="dot"),
+            name="BB Upper",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["datetime"],
+            y=df["BB_Low"],
+            line=dict(color="rgba(100,116,139,0.5)", dash="dot"),
+            name="BB Lower",
+        ),
+        row=1,
+        col=1,
     )
 
-with m3:
-    ema_val = curr["EMA_20"] if pd.notnull(curr["EMA_20"]) else curr["close"]
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">EMA (20)</div>
-            <div class="metric-val" style="color: #2563EB;">${ema_val:,.2f}</div>
-            <div class="metric-sub">단기 핵심 지지선</div>
-        </div>
-    """,
-        unsafe_allow_html=True,
+    colors_macd = [
+        "#16A34A" if (val is not None and val >= 0) else "#DC2626"
+        for val in df["MACD_Diff"]
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=df["datetime"],
+            y=df["MACD_Diff"],
+            marker_color=colors_macd,
+            name="Histogram",
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["datetime"],
+            y=df["MACD"],
+            line=dict(color="#2563EB", width=1.5),
+            name="MACD",
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["datetime"],
+            y=df["MACD_Signal"],
+            line=dict(color="#D97706", width=1.5),
+            name="Signal",
+        ),
+        row=2,
+        col=1,
     )
 
-with m4:
-    atr_val = curr["ATR"] if pd.notnull(curr["ATR"]) else 0.0
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">ATR (1H 변동폭)</div>
-            <div class="metric-val" style="color: #475569;">${atr_val:,.2f}</div>
-            <div class="metric-sub">손절/목표가 산정 지표</div>
-        </div>
-    """,
-        unsafe_allow_html=True,
+    fig.update_layout(
+        template="plotly_white",
+        plot_bgcolor="#FFFFFF",
+        paper_bgcolor="#FFFFFF",
+        height=520,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis_rangeslider_visible=False,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=11, color="#334155"),
+        ),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ---------------------------------------------------------
+    # 6. Gemini AI 질의응답
+    # ---------------------------------------------------------
+    st.markdown("### 🤖 Gemini AI 전략 어드바이저")
+
+    user_question = st.text_input(
+        "질문 입력",
+        placeholder="예: 전략 세워줘 / 지금 포지션 어떻게 볼까?",
+        label_visibility="collapsed",
     )
 
-with m5:
-    funding_color = "#16A34A" if funding_rate >= 0 else "#DC2626"
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">선물 펀딩비</div>
-            <div class="metric-val" style="color:{funding_color};">{funding_rate:.4f}%</div>
-            <div class="metric-sub">정산 주기 기준</div>
-        </div>
-    """,
-        unsafe_allow_html=True,
-    )
+    if user_question:
+        with st.spinner("Gemini AI가 시장 데이터를 분석 중입니다..."):
+            try:
+                client = genai.Client(api_key=GEMINI_API_KEY)
 
-st.write("")
-
-# ---------------------------------------------------------
-# 5. 차트 시각화
-# ---------------------------------------------------------
-fig = make_subplots(
-    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.7, 0.3]
-)
-
-fig.add_trace(
-    go.Candlestick(
-        x=df["datetime"],
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"],
-        name="Price",
-        increasing_line_color="#16A34A",
-        decreasing_line_color="#DC2626",
-    ),
-    row=1,
-    col=1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["EMA_20"],
-        line=dict(color="#2563EB", width=1.5),
-        name="EMA 20",
-    ),
-    row=1,
-    col=1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["EMA_50"],
-        line=dict(color="#9333EA", width=1.5),
-        name="EMA 50",
-    ),
-    row=1,
-    col=1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["BB_High"],
-        line=dict(color="rgba(100,116,139,0.5)", dash="dot"),
-        name="BB Upper",
-    ),
-    row=1,
-    col=1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["BB_Low"],
-        line=dict(color="rgba(100,116,139,0.5)", dash="dot"),
-        name="BB Lower",
-    ),
-    row=1,
-    col=1,
-)
-
-colors_macd = [
-    "#16A34A" if (val is not None and val >= 0) else "#DC2626"
-    for val in df["MACD_Diff"]
-]
-fig.add_trace(
-    go.Bar(
-        x=df["datetime"],
-        y=df["MACD_Diff"],
-        marker_color=colors_macd,
-        name="Histogram",
-    ),
-    row=2,
-    col=1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["MACD"],
-        line=dict(color="#2563EB", width=1.5),
-        name="MACD",
-    ),
-    row=2,
-    col=1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["MACD_Signal"],
-        line=dict(color="#D97706", width=1.5),
-        name="Signal",
-    ),
-    row=2,
-    col=1,
-)
-
-fig.update_layout(
-    template="plotly_white",
-    plot_bgcolor="#FFFFFF",
-    paper_bgcolor="#FFFFFF",
-    height=520,
-    margin=dict(l=10, r=10, t=10, b=10),
-    xaxis_rangeslider_visible=False,
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1,
-        font=dict(size=11, color='#334155'),
-    ),
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------------------------------------
-# 6. Gemini AI 질의응답
-# ---------------------------------------------------------
-st.markdown("### 🤖 Gemini AI 전략 어드바이저")
-
-user_question = st.text_input(
-    "질문 입력",
-    placeholder="예: 전략 세워줘 / 지금 포지션 어떻게 볼까?",
-    label_visibility="collapsed",
-)
-
-if user_question:
-    with st.spinner("Gemini AI가 시장 데이터를 분석 중입니다..."):
-        try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-
-            system_instruction = f"""
+                system_instruction = f"""
 너는 암호화폐 트레이딩 전문 AI 수석 전략가이다.
 제시된 실시간 시장 데이터와 질문을 분석하여 트레이딩 보고서를 제공하라.
 
@@ -476,42 +498,44 @@ if user_question:
 5. 📊 **기술적 분석 평가**: 성과 분석 상세 서술
 """
 
-            response = client.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=user_question,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction
-                ),
-            )
-
-            raw_text = response.text.strip()
-            sections = re.split(r'\n(?=\d+\.\s)', raw_text)
-
-            for section in sections:
-                if not section.strip():
-                    continue
-
-                lines = section.strip().split('\n')
-                title_line = lines[0]
-                body_lines = lines[1:]
-
-                clean_title = re.sub(
-                    r'^(###|\*\*|\d+\.\s*)', '', title_line
-                ).replace('**', '')
-                clean_title = f"{section.strip()[:2]} {clean_title}"
-
-                body_html = '<br>'.join(body_lines)
-                body_html = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', body_html)
-
-                st.markdown(
-                    f"""
-                    <div class="ai-card">
-                        <div class="ai-card-title">{clean_title}</div>
-                        <div class="ai-card-body">{body_html}</div>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
+                response = client.models.generate_content(
+                    model='gemini-3.6-flash',
+                    contents=user_question,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction
+                    ),
                 )
 
-        except Exception as e:
-            st.error(f"Gemini API 호출 중 오류가 발생했습니다: {e}")
+                raw_text = response.text.strip()
+                sections = re.split(r'\n(?=\d+\.\s)', raw_text)
+
+                for section in sections:
+                    if not section.strip():
+                        continue
+
+                    lines = section.strip().split('\n')
+                    title_line = lines[0]
+                    body_lines = lines[1:]
+
+                    clean_title = re.sub(
+                        r'^(###|\*\*|\d+\.\s*)', '', title_line
+                    ).replace('**', '')
+                    clean_title = f"{section.strip()[:2]} {clean_title}"
+
+                    body_html = '<br>'.join(body_lines)
+                    body_html = re.sub(
+                        r'\*\*(.*?)\*\*', r'<b>\1</b>', body_html
+                    )
+
+                    st.markdown(
+                        f"""
+                        <div class="ai-card">
+                            <div class="ai-card-title">{clean_title}</div>
+                            <div class="ai-card-body">{body_html}</div>
+                        </div>
+                    """,
+                        unsafe_allow_html=True,
+                    )
+
+            except Exception as e:
+                st.error(f"Gemini API 호출 중 오류가 발생했습니다: {e}")
